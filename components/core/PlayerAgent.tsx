@@ -12,7 +12,6 @@ import {
 } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import agentPrompt, { pokemonTools } from "@/prompts/agent-prompt";
-import { XCircle } from "lucide-react";
 import Image from "next/image";
 import OpenAI from "openai";
 import { useEffect, useRef, useState } from "react";
@@ -90,6 +89,7 @@ export default function PlayerAgent() {
   const [turnCount, setTurnCount] = useState(0);
   const [reasoningStream, setReasoningStream] = useState<string>("");
   const reasoningScrollAreaRef = useRef<HTMLDivElement>(null);
+  const actionHistoryScrollAreaRef = useRef<HTMLDivElement>(null);
 
   const { screenshotDataUrl, takeScreenshot, pressKey, isGameRunning } =
     useEmulator();
@@ -126,15 +126,78 @@ export default function PlayerAgent() {
 
   // Auto-scroll reasoning area when new content arrives
   useEffect(() => {
-    if (reasoningScrollAreaRef.current && loading) {
-      const scrollArea = reasoningScrollAreaRef.current;
-      scrollArea.scrollTop = scrollArea.scrollHeight;
-      console.log(
-        "Auto-scrolling reasoning area, current content length:",
-        reasoningStream.length
+    // Function to scroll to bottom
+    const scrollToBottom = () => {
+      const scrollableDiv = reasoningScrollAreaRef.current?.querySelector(
+        "[data-radix-scroll-area-viewport]"
       );
+      if (scrollableDiv) {
+        scrollableDiv.scrollTop = scrollableDiv.scrollHeight;
+        console.log("Auto-scrolling reasoning area to bottom");
+      }
+    };
+
+    if (reasoningScrollAreaRef.current && (loading || reasoningStream)) {
+      // Immediate scroll attempt
+      setTimeout(scrollToBottom, 50);
+
+      // Set up mutation observer to detect content changes
+      const contentDiv = reasoningScrollAreaRef.current.querySelector(
+        ".whitespace-pre-wrap"
+      );
+      if (contentDiv) {
+        const observer = new MutationObserver(() => {
+          setTimeout(scrollToBottom, 10);
+        });
+
+        observer.observe(contentDiv, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+        });
+
+        // Clean up observer
+        return () => observer.disconnect();
+      }
     }
   }, [reasoningStream, loading]);
+
+  // Auto-scroll action history when new actions are added
+  useEffect(() => {
+    // Function to scroll to bottom
+    const scrollToBottom = () => {
+      const scrollableDiv = actionHistoryScrollAreaRef.current?.querySelector(
+        "[data-radix-scroll-area-viewport]"
+      );
+      if (scrollableDiv) {
+        scrollableDiv.scrollTop = scrollableDiv.scrollHeight;
+        console.log("Auto-scrolling action history to bottom");
+      }
+    };
+
+    if (actionHistoryScrollAreaRef.current && actionHistory.length > 0) {
+      // Immediate scroll attempt
+      setTimeout(scrollToBottom, 50);
+
+      // Set up mutation observer to detect content changes
+      const contentDiv =
+        actionHistoryScrollAreaRef.current.querySelector(".p-4");
+      if (contentDiv) {
+        const observer = new MutationObserver(() => {
+          setTimeout(scrollToBottom, 10);
+        });
+
+        observer.observe(contentDiv, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+        });
+
+        // Clean up observer
+        return () => observer.disconnect();
+      }
+    }
+  }, [actionHistory]);
 
   // Toggle auto-play
   const toggleAutoPlay = () => {
@@ -152,14 +215,56 @@ export default function PlayerAgent() {
         toolCall.function.arguments
       );
 
+      // Try to parse the arguments - handle different formats
+      type ToolArgs = {
+        direction?: "up" | "down" | "left" | "right";
+        times?: number;
+      };
+
+      let args: ToolArgs = {};
+      try {
+        if (toolCall.function.arguments) {
+          // Clean up the arguments if needed
+          let argsStr = toolCall.function.arguments;
+
+          // Remove surrounding quotes if present (sometimes happens with streaming)
+          argsStr = argsStr.replace(/^["']|["']$/g, "");
+
+          // Handle case where arguments might not be a complete JSON object
+          if (!argsStr.startsWith("{") && !argsStr.startsWith("[")) {
+            // Try to make it a valid JSON by wrapping in braces
+            try {
+              args = JSON.parse(`{${argsStr}}`);
+            } catch {
+              // If that fails, try with different formatting
+              argsStr = argsStr.replace(
+                /(['"])?([a-zA-Z0-9_]+)(['"])?:/g,
+                '"$2":'
+              );
+              argsStr = argsStr.replace(/'/g, '"');
+              try {
+                args = JSON.parse(`{${argsStr}}`);
+              } catch (e) {
+                console.error("Failed to parse arguments in multiple ways:", e);
+                args = {}; // Default empty object
+              }
+            }
+          } else {
+            // It's already a JSON object format
+            args = JSON.parse(argsStr);
+          }
+        }
+      } catch (error) {
+        console.error("Error parsing tool call arguments:", error);
+        console.log("Using empty args object instead");
+      }
+
       switch (functionName) {
         case "move_direction":
-          const { direction, times = 1 } = JSON.parse(
-            toolCall.function.arguments
-          ) as {
-            direction: "up" | "down" | "left" | "right";
-            times?: number;
-          };
+          const direction = args.direction || "up"; // Default direction
+          const times = args.times || 1; // Default times
+
+          console.log(`Moving ${direction} ${times} times`);
 
           // Press the key 'times' number of times
           for (let i = 0; i < times; i++) {
@@ -293,6 +398,46 @@ export default function PlayerAgent() {
               );
             }
 
+            // Handle partial tool calls - show them in the reasoning area
+            if (data.partial_tool_calls && data.partial_tool_calls.length > 0) {
+              const toolCall = data.partial_tool_calls[0];
+              if (toolCall.function) {
+                const name = toolCall.function.name || "";
+                const partialArgs = toolCall.function.arguments || "";
+
+                // Only update if we have something meaningful
+                if (name || partialArgs) {
+                  setReasoningStream((prev) => {
+                    // Check if we already have tool call info in the stream
+                    const hasToolCallInfo = prev.includes("Tool call:");
+
+                    let newStream = prev;
+                    if (!hasToolCallInfo) {
+                      // Add a new tool call section
+                      newStream += newStream ? "\n\nTool call:" : "Tool call:";
+                    } else {
+                      // Remove the previous tool call section to replace it
+                      newStream =
+                        newStream.split("Tool call:")[0] + "Tool call:";
+                    }
+
+                    if (name) {
+                      newStream += `\nFunction: ${name}`;
+                    }
+                    if (partialArgs) {
+                      // Clean up args for display
+                      const displayArgs = partialArgs
+                        .replace(/^["'{}]|["'{}]$/g, "")
+                        .replace(/\\"/g, '"');
+                      newStream += `\nArgs: ${displayArgs}`;
+                    }
+
+                    return newStream;
+                  });
+                }
+              }
+            }
+
             // Handle final message
             if (data.finalMessage) {
               console.log("Received final message:", data.finalMessage);
@@ -305,6 +450,35 @@ export default function PlayerAgent() {
         }
       } finally {
         reader.releaseLock();
+      }
+
+      // Try to parse any accumulated tool call arguments as JSON if needed
+      if (finalAssistantMessage?.tool_calls) {
+        for (const toolCall of finalAssistantMessage.tool_calls) {
+          if (toolCall.function && toolCall.function.arguments) {
+            try {
+              // Try to parse if it's not already a valid JSON object
+              if (
+                typeof toolCall.function.arguments === "string" &&
+                !toolCall.function.arguments.startsWith("{") &&
+                !toolCall.function.arguments.startsWith("[")
+              ) {
+                const cleanedArgs = toolCall.function.arguments
+                  .replace(/^"+|"+$/g, "") // Remove surrounding quotes if any
+                  .replace(/\\"/g, '"'); // Replace escaped quotes
+
+                // Check if it's a valid JSON string
+                JSON.parse(`{${cleanedArgs}}`);
+
+                // If it parsed successfully, format it properly
+                toolCall.function.arguments = `{${cleanedArgs}}`;
+              }
+            } catch (e) {
+              // If parsing fails, leave it as is
+              console.log("Failed to clean tool call arguments:", e);
+            }
+          }
+        }
       }
 
       // If we didn't get a final message, construct a basic one
@@ -329,23 +503,32 @@ export default function PlayerAgent() {
         assistantMessage.tool_calls.length > 0
       ) {
         console.log("Tool calls found:", assistantMessage.tool_calls);
+
+        // Use the first tool call - most relevant for this Pokemon agent scenario
         const toolCall = assistantMessage.tool_calls[0];
-        await processToolCall(toolCall);
 
-        // Add tool response to the conversation
-        const toolResponse: OpenAI.ChatCompletionMessageParam = {
-          role: "tool",
-          tool_call_id: toolCall.id,
-          content: JSON.stringify({
-            success: true,
-            result: "Action executed successfully",
-          }),
-        };
+        if (toolCall && toolCall.function) {
+          // Execute the tool call
+          await processToolCall(toolCall);
 
-        // Update conversation with the tool response
-        setConversation((prev) => [...prev, toolResponse]);
+          // Add tool response to the conversation
+          const toolResponse: OpenAI.ChatCompletionMessageParam = {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({
+              success: true,
+              result: "Action executed successfully",
+            }),
+          };
 
-        setResponse(`Action taken: ${toolCall.function.name}`);
+          // Update conversation with the tool response
+          setConversation((prev) => [...prev, toolResponse]);
+
+          setResponse(`Action taken: ${toolCall.function.name}`);
+        } else {
+          console.error("Tool call found but is malformed:", toolCall);
+          setResponse("Received an invalid tool call. Please try again.");
+        }
       } else if (assistantMessage.content) {
         // If there's content but no tool calls
         if (typeof assistantMessage.content === "string") {
@@ -432,44 +615,24 @@ export default function PlayerAgent() {
               </div>
             </div>
 
-            {/* Reasoning Stream */}
+            {/* Action History - Moved to right side */}
             <div className="space-y-2 flex-1">
-              <div className="font-medium flex justify-between items-center">
-                <span>AI Reasoning:</span>
-                {reasoningStream && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs"
-                    onClick={() => setReasoningStream("")}
-                  >
-                    <XCircle className="h-3 w-3 mr-1" />
-                    Clear
-                  </Button>
-                )}
-              </div>
+              <div className="font-medium">Action History:</div>
               <ScrollArea
                 className="border rounded-md bg-muted/50 h-40"
-                ref={reasoningScrollAreaRef}
+                ref={actionHistoryScrollAreaRef}
               >
-                <div className="whitespace-pre-wrap p-4">
-                  {loading ? (
-                    reasoningStream ? (
-                      <div className="text-sky-400 animate-pulse-slow">
-                        {reasoningStream}
-                        <span className="animate-pulse">▌</span>
-                      </div>
-                    ) : (
-                      <span className="sky-blue-text animate-pulse">
-                        Thinking...
-                      </span>
-                    )
-                  ) : reasoningStream ? (
-                    <span>{reasoningStream}</span>
+                <div className="p-4">
+                  {actionHistory.length > 0 ? (
+                    <ul className="list-disc pl-5">
+                      {actionHistory.map((action, index) => (
+                        <li key={index}>{action}</li>
+                      ))}
+                    </ul>
                   ) : (
-                    <span className="text-muted-foreground italic">
-                      Reasoning will appear here during thinking
-                    </span>
+                    <p className="text-muted-foreground">
+                      No actions taken yet
+                    </p>
                   )}
                 </div>
               </ScrollArea>
@@ -482,37 +645,40 @@ export default function PlayerAgent() {
             </div>
           )}
 
-          {/* Action History */}
+          {/* AI Response section */}
           <div className="space-y-2">
-            <div className="font-medium">Action History:</div>
-            <ScrollArea className="p-4 border rounded-md bg-muted/50 h-32">
-              {actionHistory.length > 0 ? (
-                <ul className="list-disc pl-5">
-                  {actionHistory.map((action, index) => (
-                    <li key={index}>{action}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-muted-foreground">No actions taken yet</p>
-              )}
-            </ScrollArea>
-          </div>
-
-          <div className="space-y-2">
-            <div className="font-medium">AI Response:</div>
-            <div
-              className={`p-4 border rounded-md bg-muted/50 min-h-24 whitespace-pre-wrap ${
+            <div className="font-medium">
+              <span>AI Response:</span>
+            </div>
+            <ScrollArea
+              className={`border rounded-md bg-muted/50 h-[180px] transition-all duration-200 ${
                 loading ? "sky-blue-border" : ""
               }`}
+              ref={reasoningScrollAreaRef}
             >
-              {loading ? (
-                <span className="sky-blue-text animate-pulse">Thinking...</span>
-              ) : response ? (
-                response
-              ) : (
-                "Response will appear here"
-              )}
-            </div>
+              <div className="whitespace-pre-wrap p-4">
+                {loading ? (
+                  reasoningStream ? (
+                    <div className="text-sky-400 animate-pulse-slow">
+                      {reasoningStream}
+                      <span className="animate-pulse">▌</span>
+                    </div>
+                  ) : (
+                    <span className="sky-blue-text animate-pulse">
+                      Thinking...
+                    </span>
+                  )
+                ) : reasoningStream ? (
+                  <span>{reasoningStream}</span>
+                ) : response ? (
+                  response
+                ) : (
+                  <span className="text-muted-foreground italic">
+                    Response will appear here
+                  </span>
+                )}
+              </div>
+            </ScrollArea>
           </div>
         </CardContent>
         <CardFooter className="flex gap-2">

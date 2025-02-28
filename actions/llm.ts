@@ -176,9 +176,20 @@ export async function generate<T extends object | undefined = undefined>(
                 );
               }
 
+              // Define a type for the Anthropic-style tool call with index
+              type AnthropicToolCall = {
+                index?: number;
+                id?: string;
+                type?: string;
+                function?: {
+                  name?: string;
+                  arguments?: string;
+                };
+              };
+
               // Accumulate tool calls if they exist
               if (delta.tool_calls && delta.tool_calls.length > 0) {
-                for (const toolCall of delta.tool_calls) {
+                for (const toolCall of delta.tool_calls as AnthropicToolCall[]) {
                   // If we have an id, use it to track the tool call
                   if (toolCall.id) {
                     // Initialize tool call in our tracking object if it doesn't exist
@@ -211,8 +222,48 @@ export async function generate<T extends object | undefined = undefined>(
                             "") + toolCall.function.arguments;
                       }
                     }
+                  } else if (toolCall.index !== undefined) {
+                    // Handle tool calls with index instead of id (Anthropic format)
+                    const index = toolCall.index;
+                    // Initialize tool_calls array if needed
+                    if (!messageObject.tool_calls) {
+                      messageObject.tool_calls = [];
+                    }
+
+                    // Create a placeholder id if needed
+                    const placeholderId = `tool-${index}`;
+
+                    // Initialize or update the tool call object
+                    if (!messageObject.tool_calls[index]) {
+                      messageObject.tool_calls[index] = {
+                        id: placeholderId,
+                        type: toolCall.type || "function",
+                        function: {
+                          name: toolCall.function?.name || "",
+                          arguments: toolCall.function?.arguments || "",
+                        },
+                      };
+                    } else {
+                      // Update existing tool call
+                      if (toolCall.function?.name) {
+                        messageObject.tool_calls[index].function.name =
+                          toolCall.function.name;
+                      }
+                      if (toolCall.function?.arguments) {
+                        messageObject.tool_calls[index].function.arguments +=
+                          toolCall.function.arguments;
+                      }
+                    }
                   }
                 }
+
+                // Also send partial tool call information to the client
+                // This allows the client to show progress
+                const toolCallData = JSON.stringify({
+                  partial_tool_calls: messageObject.tool_calls,
+                });
+                controller.enqueue(new TextEncoder().encode(toolCallData));
+
                 // Log the updated tool calls
                 console.log("Updated tool calls:", messageObject.tool_calls);
               }
@@ -220,15 +271,32 @@ export async function generate<T extends object | undefined = undefined>(
               // Only add actual content to the fullResponse
               if (content) {
                 messageObject.content = (messageObject.content || "") + content;
+                controller.enqueue(new TextEncoder().encode(content));
+              }
+            }
 
-                // Also send tool call information to the client when available
-                if (delta.tool_calls && delta.tool_calls.length > 0) {
-                  const toolCallData = JSON.stringify({
-                    tool_calls: delta.tool_calls,
-                  });
-                  controller.enqueue(new TextEncoder().encode(toolCallData));
-                } else {
-                  controller.enqueue(new TextEncoder().encode(content));
+            // Try to parse any accumulated tool call arguments as JSON
+            if (
+              messageObject.tool_calls &&
+              messageObject.tool_calls.length > 0
+            ) {
+              for (const toolCall of messageObject.tool_calls) {
+                if (toolCall.function && toolCall.function.arguments) {
+                  try {
+                    // Sometimes arguments come as escaped JSON strings - try to clean and parse
+                    const cleanedArgs = toolCall.function.arguments
+                      .replace(/^"+|"+$/g, "") // Remove surrounding quotes
+                      .replace(/\\"/g, '"'); // Replace escaped quotes
+
+                    // Try to parse as JSON if it starts with { or [
+                    if (/^[\{\[]/.test(cleanedArgs)) {
+                      const parsed = JSON.parse(cleanedArgs);
+                      toolCall.function.arguments = JSON.stringify(parsed);
+                    }
+                  } catch (e) {
+                    // If parsing fails, leave as is
+                    console.log("Failed to parse tool call arguments:", e);
+                  }
                 }
               }
             }

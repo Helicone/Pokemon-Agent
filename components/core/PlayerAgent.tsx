@@ -11,7 +11,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { readStream } from "@/lib/utils/stream";
 import agentPrompt, { pokemonTools } from "@/prompts/agent-prompt";
 import Image from "next/image";
 import OpenAI from "openai";
@@ -245,8 +244,8 @@ export default function PlayerAgent() {
               argsStr = argsStr.replace(/'/g, '"');
               try {
                 args = JSON.parse(`{${argsStr}}`);
-              } catch {
-                console.error("Failed to parse arguments in multiple ways:");
+              } catch (e) {
+                console.error("Failed to parse arguments in multiple ways:", e);
                 args = {}; // Default empty object
               }
             }
@@ -351,65 +350,49 @@ export default function PlayerAgent() {
 
       // Generate the response - this now returns a ReadableStream directly when streaming
       const streamResponse = (await generate({
-        model: "anthropic/claude-3.7-sonnet:beta",
+        model: "anthropic/claude-3.7-sonnet:thinking",
         messages: messages,
         tools: pokemonTools,
         reasoningEffort: "low",
         stream: true,
       })) as ReadableStream<Uint8Array>;
 
+      console.log("Received stream response");
+
+      // Create a reader to read the stream chunks
+      const reader = streamResponse.getReader();
+
       // Initialize variables to store the final response
       type ExtendedAssistantMessage = OpenAI.ChatCompletionMessageParam & {
-        role: string;
-        content: string | null;
         tool_calls?: OpenAI.ChatCompletionMessageToolCall[];
       };
 
       let finalAssistantMessage: ExtendedAssistantMessage | null = null;
+      let fullResponse = "";
 
-      // Use our readStream utility to handle chunks properly
-      let jsonBuffer = ""; // Buffer to accumulate partial JSON objects
-
-      const fullResponse = await readStream(streamResponse, (chunk) => {
-        // Process each chunk as it arrives
-        // We need to handle cases where JSON objects are split across chunks
-        jsonBuffer += chunk;
-
-        // Try to extract complete JSON objects from the buffer
-        // This is a more robust approach than trying to parse each chunk individually
+      try {
+        // Read chunks from the stream
         while (true) {
+          const { done, value } = await reader.read();
+
+          if (done) {
+            console.log("Stream reading complete");
+            break;
+          }
+
+          // Convert the chunk to text
+          const chunkText = new TextDecoder().decode(value);
+          fullResponse += chunkText;
+
+          console.log("Received chunk:", chunkText.substring(0, 100));
+
           try {
-            // Find the position of the first JSON opening brace
-            const startPos = jsonBuffer.indexOf("{");
-            if (startPos === -1) break; // No JSON objects in buffer
+            // Try to parse the chunk as JSON
+            const data = JSON.parse(chunkText);
 
-            // Try to parse what looks like a complete JSON object
-            // Find a matching closing brace
-            let depth = 0;
-            let endPos = -1;
-
-            for (let i = startPos; i < jsonBuffer.length; i++) {
-              if (jsonBuffer[i] === "{") depth++;
-              else if (jsonBuffer[i] === "}") {
-                depth--;
-                if (depth === 0) {
-                  endPos = i + 1;
-                  break;
-                }
-              }
-            }
-
-            if (endPos === -1) break; // No complete JSON object yet
-
-            // Extract the potential JSON object
-            const jsonStr = jsonBuffer.substring(startPos, endPos);
-
-            // Try to parse it
-            const data = JSON.parse(jsonStr);
-
-            // Process the parsed data
             // Handle reasoning data
             if (data.reasoning) {
+              console.log("Found reasoning data:", data.reasoning);
               setReasoningStream((prev) =>
                 prev ? `${prev}\n${data.reasoning}` : data.reasoning
               );
@@ -457,63 +440,42 @@ export default function PlayerAgent() {
 
             // Handle final message
             if (data.finalMessage) {
+              console.log("Received final message:", data.finalMessage);
               finalAssistantMessage = data.finalMessage;
             }
-
-            // Remove the processed JSON object from the buffer
-            jsonBuffer = jsonBuffer.substring(endPos).trim();
-
-            // If buffer is empty, we're done
-            if (jsonBuffer.length === 0) break;
           } catch {
-            // If parsing fails, it might be an incomplete JSON object
-            // or not JSON at all - we'll keep accumulating
-            break;
+            // If it's not JSON, it might be regular text content
+            // Ignore errors from trying to parse non-JSON content
           }
         }
-
-        // Check if we have content that's not JSON
-        // This handles regular text content that might be part of the stream
-        if (
-          jsonBuffer &&
-          !jsonBuffer.startsWith("{") &&
-          !jsonBuffer.includes("{")
-        ) {
-          // It's probably plain text content
-          setReasoningStream((prev) =>
-            prev ? `${prev}\n${jsonBuffer}` : jsonBuffer
-          );
-          jsonBuffer = "";
-        }
-      });
+      } finally {
+        reader.releaseLock();
+      }
 
       // Try to parse any accumulated tool call arguments as JSON if needed
-      if (finalAssistantMessage) {
-        const typedMessage = finalAssistantMessage as ExtendedAssistantMessage;
-        if (typedMessage.tool_calls) {
-          for (const toolCall of typedMessage.tool_calls) {
-            if (toolCall.function && toolCall.function.arguments) {
-              try {
-                // Try to parse if it's not already a valid JSON object
-                if (
-                  typeof toolCall.function.arguments === "string" &&
-                  !toolCall.function.arguments.startsWith("{") &&
-                  !toolCall.function.arguments.startsWith("[")
-                ) {
-                  const cleanedArgs = toolCall.function.arguments
-                    .replace(/^"+|"+$/g, "") // Remove surrounding quotes if any
-                    .replace(/\\"/g, '"'); // Replace escaped quotes
+      if (finalAssistantMessage?.tool_calls) {
+        for (const toolCall of finalAssistantMessage.tool_calls) {
+          if (toolCall.function && toolCall.function.arguments) {
+            try {
+              // Try to parse if it's not already a valid JSON object
+              if (
+                typeof toolCall.function.arguments === "string" &&
+                !toolCall.function.arguments.startsWith("{") &&
+                !toolCall.function.arguments.startsWith("[")
+              ) {
+                const cleanedArgs = toolCall.function.arguments
+                  .replace(/^"+|"+$/g, "") // Remove surrounding quotes if any
+                  .replace(/\\"/g, '"'); // Replace escaped quotes
 
-                  // Check if it's a valid JSON string
-                  JSON.parse(`{${cleanedArgs}}`);
+                // Check if it's a valid JSON string
+                JSON.parse(`{${cleanedArgs}}`);
 
-                  // If it parsed successfully, format it properly
-                  toolCall.function.arguments = `{${cleanedArgs}}`;
-                }
-              } catch (e) {
-                // If parsing fails, leave it as is
-                console.log("Failed to clean tool call arguments:", e);
+                // If it parsed successfully, format it properly
+                toolCall.function.arguments = `{${cleanedArgs}}`;
               }
+            } catch (e) {
+              // If parsing fails, leave it as is
+              console.log("Failed to clean tool call arguments:", e);
             }
           }
         }
@@ -521,6 +483,7 @@ export default function PlayerAgent() {
 
       // If we didn't get a final message, construct a basic one
       if (!finalAssistantMessage) {
+        console.log("No final message received, constructing from content");
         finalAssistantMessage = {
           role: "assistant",
           content: fullResponse,
@@ -528,8 +491,7 @@ export default function PlayerAgent() {
       }
 
       // Handle the response
-      const assistantMessage =
-        finalAssistantMessage as ExtendedAssistantMessage;
+      const assistantMessage = finalAssistantMessage;
       console.log("Final assistant message:", assistantMessage);
 
       // Add assistant message to conversation
@@ -537,7 +499,6 @@ export default function PlayerAgent() {
 
       // Process tool calls if present
       if (
-        assistantMessage &&
         assistantMessage.tool_calls &&
         assistantMessage.tool_calls.length > 0
       ) {

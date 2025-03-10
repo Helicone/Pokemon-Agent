@@ -1,12 +1,11 @@
 "use server";
-import { ModelType } from "@/types/models";
 import { headers } from "next/headers";
 import OpenAI from "openai";
 import { zodResponseFormat } from "openai/helpers/zod";
 import { z } from "zod";
 
 export interface GenerationParameters {
-  model: ModelType;
+  model: string;
   messages: OpenAI.ChatCompletionMessageParam[];
   temperature?: number;
   tools?: OpenAI.ChatCompletionTool[];
@@ -85,6 +84,7 @@ export async function generate<T extends object | undefined = undefined>(
     const requestParams = props.reasoningEffort
       ? {
           ...baseParams,
+          include_reasoning: true,
           reasoning: {
             effort: props.reasoningEffort,
           },

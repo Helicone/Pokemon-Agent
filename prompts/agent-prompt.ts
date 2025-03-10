@@ -19,6 +19,7 @@ For each turn:
 3. Use the appropriate tool to execute that action
 
 Tips and good practices:
+- Unless there is an arrow pointing towards a fully black area, the character usually can't move towards that fully black area.
 - In the case that you've been stuck for 1-3 turns without making ANY progress, it's likely that you need to come up with a new plan.`
     ),
     {

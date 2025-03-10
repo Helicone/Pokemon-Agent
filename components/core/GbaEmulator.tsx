@@ -12,22 +12,13 @@ import dynamic from "next/dynamic";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { GbaContext, GbaProvider } from "react-gbajs";
 import { useEmulator } from "./EmulatorContext";
-
-// Create a loading component for the dynamic import
-const LoadingEmulator = () => (
-  <div className="w-full h-full flex items-center justify-center bg-muted rounded-md">
-    <div className="h-full w-full flex flex-col items-center">
-      <div className="animate-spin rounded-full h-full w-full border-b-2 border-primary mb-2"></div>
-      <p>Loading emulator...</p>
-    </div>
-  </div>
-);
+import RetroLoadingScreen from "./RetroLoadingScreen";
 
 // Import ReactGbaJs dynamically to ensure it's only loaded on the client
 // We create a separate file for this component to avoid the direct import in this file
 const ReactGbaJsDynamic = dynamic(() => import("./ReactGbaJsWrapper"), {
   ssr: false,
-  loading: () => <LoadingEmulator />,
+  loading: () => <RetroLoadingScreen height="100%" />,
 });
 
 // Inner component that uses the GBA context
@@ -213,8 +204,8 @@ export default function GbaEmulator() {
           <CardDescription>GBA Emulator</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col items-center">
-          <div className="w-full h-[320px] flex items-center justify-center bg-muted rounded-md">
-            <p>Initializing emulator...</p>
+          <div className="w-full" style={{ height: "320px" }}>
+            <RetroLoadingScreen height="100%" message="INITIALIZING..." />
           </div>
         </CardContent>
       </Card>
